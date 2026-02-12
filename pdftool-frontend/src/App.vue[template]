@@ -1,0 +1,397 @@
+<template>
+  <div class="app">
+    <header class="hero">
+      <div>
+        <h1>PDF 图像翻译工具</h1>
+        <p>支持批量翻译、分页显示和自定义模型提供商。</p>
+      </div>
+      <div class="hero-actions">
+        <input v-model="taskIdInput" type="text" placeholder="任务 ID" />
+        <button class="ghost" type="button" @click="loadTask" :disabled="!taskIdInput">载入任务</button>
+        <button class="ghost" type="button" @click="openSettings">设置</button>
+      </div>
+    </header>
+
+    <section class="card">
+      <h2>上传 PDF</h2>
+      <p class="muted">拖拽或点击上传 PDF 文件，系统会自动拆页并翻译。</p>
+      <div
+        class="upload-bar dropzone"
+        :class="{ 'dropzone--active': dragOverUpload }"
+        @dragover="handleDragOver"
+        @dragenter="handleDragOver"
+        @dragleave="handleDragLeave"
+        @drop="handleDrop"
+        @click="triggerPick"
+      >
+        <div class="upload-info">
+          <strong>{{ selectedFileName || "拖拽或点击选择 PDF" }}</strong>
+          <span>{{ uploading ? "上传中..." : "仅支持 PDF" }}</span>
+        </div>
+        <div class="upload-actions">
+          <button class="ghost" type="button" :disabled="!canUpload">选择文件</button>
+        </div>
+        <input ref="fileInput" class="hidden-input" type="file" accept="application/pdf" @change="onFileChange" />
+      </div>
+    </section>
+
+    <section class="card settings-card">
+      <h2>显示 & 批量设置</h2>
+      <div class="settings-grid">
+        <label>
+          <span>每批显示页数（最多 50）</span>
+          <div class="setting-control">
+            <select v-model="displaySizeMode">
+              <option v-for="option in displaySizeOptions" :key="option" :value="option">
+                {{ option === "custom" ? "自定义" : option }}
+              </option>
+            </select>
+            <input
+              v-if="displaySizeMode === 'custom'"
+              type="number"
+              min="1"
+              v-model="displayCustomSize"
+              placeholder="请输入数量"
+            />
+          </div>
+        </label>
+        <label>
+          <span>批量翻译每批页数</span>
+          <div class="setting-control">
+            <select v-model="translationBatchMode">
+              <option v-for="option in translationBatchOptions" :key="option" :value="option">
+                {{ option === "custom" ? "自定义" : option === "all" ? "全部" : option }}
+              </option>
+            </select>
+            <input
+              v-if="translationBatchMode === 'custom'"
+              type="number"
+              min="1"
+              v-model="translationCustomSize"
+              placeholder="一次处理多少页"
+            />
+          </div>
+        </label>
+        <label>
+          <span>翻译范围</span>
+          <div class="setting-control">
+            <select v-model="translationRangeMode">
+              <option v-for="option in translationRangeOptions" :key="option" :value="option">
+                {{
+                  option === "custom"
+                    ? "自定义"
+                    : option === "all"
+                    ? "全部"
+                    : option === "range"
+                    ? "区间"
+                    : option
+                }}
+              </option>
+            </select>
+            <input
+              v-if="translationRangeMode === 'custom'"
+              type="number"
+              min="1"
+              v-model="translationRangeCustom"
+              placeholder="翻译前 N 页"
+            />
+            <div v-if="translationRangeMode === 'range'" class="range-inputs">
+              <input type="number" min="1" v-model="translationRangeStart" placeholder="起始页" />
+              <span>~</span>
+              <input type="number" min="1" v-model="translationRangeEnd" placeholder="结束页" />
+            </div>
+          </div>
+        </label>
+      </div>
+      <div class="pagination">
+        <button class="ghost" type="button" @click="goToPage(-1)" :disabled="currentPageIndex === 1">上一批</button>
+        <span>第 {{ currentPageIndex }} / {{ totalPageCount }} 批</span>
+        <button class="ghost" type="button" @click="goToPage(1)" :disabled="currentPageIndex === totalPageCount">
+          下一批
+        </button>
+      </div>
+    </section>
+
+    <section v-if="task" class="card selection-card">
+      <div class="selection-toolbar">
+        <span>已选择 {{ selectedPages.length }} 页</span>
+        <div class="toolbar-actions">
+          <button class="ghost" type="button" @click="selectVisiblePages" :disabled="!visiblePages.length">
+            选中当前批
+          </button>
+          <button class="ghost" type="button" @click="selectAllPages" :disabled="!task?.pages.length">全选全部</button>
+          <button class="ghost" type="button" @click="clearSelection" :disabled="!selectedPages.length">清空选择</button>
+        </div>
+      </div>
+      <div class="selection-toolbar actions">
+        <div class="toolbar-actions">
+          <button class="ghost" type="button" @click="retryVisibleBatch" :disabled="!visiblePages.length">
+            翻译当前批
+          </button>
+          <button class="ghost" type="button" @click="retrySelectedPages" :disabled="!selectedPages.length">
+            翻译选中
+          </button>
+          <button class="ghost" type="button" @click="retryRangePages" :disabled="!task?.pages.length">
+            按范围翻译
+          </button>
+          <button class="ghost" type="button" @click="retryFailedPages" :disabled="!failedPageNumbers.length">
+            重试失败 ({{ failedPageNumbers.length }})
+          </button>
+        </div>
+        <div class="batch-status" v-if="batchStatus.running">
+          <span v-if="batchStatus.paused">已暂停 · </span>
+          正在翻译 {{ batchStatus.processed }}/{{ batchStatus.total }}
+          <button class="ghost" type="button" @click="toggleBatchPause">
+            {{ batchStatus.paused ? "继续" : "暂停" }}
+          </button>
+        </div>
+        <div class="batch-status" v-else-if="batchStatus.message">
+          {{ batchStatus.message }}
+        </div>
+      </div>
+    </section>
+
+    <section v-if="task" class="card">
+      <div class="task-head">
+        <div>
+          <h2>{{ task.fileName }}</h2>
+          <p class="muted">任务 ID：{{ task.id }} ｜ 页数：{{ task.totalPages }} ｜ 更新时间：{{ formatDate(task.updatedAt) }}</p>
+        </div>
+        <div class="task-actions">
+          <button
+            class="ghost"
+            :class="layoutButtonClass"
+            type="button"
+            @click="runAiLayout"
+            :disabled="layoutLoading || !providerReady || !task"
+          >
+            {{ layoutButtonLabel }}
+          </button>
+          <button class="ghost" type="button" :disabled="isExporting.txtOriginal" @click="exportTxt('original')">
+            {{ isExporting.txtOriginal ? "生成原版 TXT..." : "导出原版 TXT" }}
+          </button>
+          <button
+            class="ghost"
+            type="button"
+            :disabled="isExporting.txtFormatted || !task.formattedByAI"
+            @click="exportTxt('formatted')"
+          >
+            {{ isExporting.txtFormatted ? "生成排版 TXT..." : "导出 AI 排版 TXT" }}
+          </button>
+          <button class="ghost" type="button" :disabled="isExporting.pdf" @click="exportPdf">
+            {{ isExporting.pdf ? "生成 PDF..." : "导出 PDF" }}
+          </button>
+        </div>
+      </div>
+      <div class="layout-status" v-if="layoutStatus !== 'idle'">
+        <span v-if="layoutStatus === 'running'" class="status running">AI 排版进行中，请稍候...</span>
+        <span v-else-if="layoutStatus === 'success'" class="status success">AI 排版完成，可下载排版版 TXT</span>
+        <span v-else-if="layoutStatus === 'error'" class="status error">{{ layoutStatusMessage }}</span>
+      </div>
+      <div class="links" v-if="task.combinedTxtUrl || task.combinedPdfUrl || task.formattedTxtUrl">
+        <a v-if="task.combinedTxtUrl" :href="resolveAssetUrl(task.combinedTxtUrl)" target="_blank" rel="noopener">下载原版 TXT</a>
+        <a
+          v-if="task.formattedTxtUrl"
+          :href="resolveAssetUrl(task.formattedTxtUrl)"
+          target="_blank"
+          rel="noopener"
+        >
+          下载 AI 排版 TXT
+        </a>
+        <a v-if="task.combinedPdfUrl" :href="resolveAssetUrl(task.combinedPdfUrl)" target="_blank" rel="noopener">下载最新 PDF</a>
+      </div>
+    </section>
+
+    <section v-if="task" class="grid">
+      <article v-for="page in visiblePages" :key="page.id" class="page-card">
+        <header>
+          <div class="page-title">
+            <label class="checkbox">
+              <input type="checkbox" :checked="isSelected(page.pageNumber)" @change="togglePageSelection(page.pageNumber)" />
+              <span>第 {{ page.pageNumber }} 页</span>
+            </label>
+            <span class="badge" :class="`badge--${page.status}`">{{ statusLabel(page.status) }}</span>
+          </div>
+          <button
+            type="button"
+            class="ghost"
+            @click="retryPages([page.pageNumber])"
+            :disabled="!!retranslateLoading[page.pageNumber]"
+          >
+            {{ retranslateLoading[page.pageNumber] ? "翻译中..." : "重新翻译" }}
+          </button>
+        </header>
+
+        <div class="image-box">
+          <img v-if="page.imageUrl" :src="resolveAssetUrl(page.imageUrl)" :alt="`第${page.pageNumber}页`" />
+        </div>
+
+        <div class="text-block">
+          <label>识别原文</label>
+          <textarea readonly :value="page.sourceText || '未识别到有效文字'"></textarea>
+        </div>
+
+        <div class="text-block">
+          <label>译文（简体中文）</label>
+          <textarea readonly :value="page.translation || (page.hasText ? '译文为空' : '该页判定为纯图片')"></textarea>
+          <div class="text-actions">
+            <button type="button" class="ghost" :disabled="!page.translation" @click="copyText(page.translation)">
+              复制译文
+            </button>
+            <a v-if="page.textUrl" :href="resolveAssetUrl(page.textUrl)" target="_blank" rel="noopener">下载 TXT</a>
+          </div>
+        </div>
+
+        <p v-if="page.error" class="error">翻译失败：{{ page.error }}</p>
+        <p v-else-if="!page.hasText" class="muted small">未检测到文本，合并 TXT 时将跳过此页。</p>
+      </article>
+    </section>
+
+    <section v-else class="card placeholder">
+      <p>尚无任务结果，请先上传 PDF 或填入任务 ID。</p>
+    </section>
+
+    <div v-if="showSettings" class="settings-overlay" @click.self="closeSettings">
+      <div class="settings-panel">
+        <header class="settings-header">
+          <h3>模型与接口设置</h3>
+          <button class="ghost" type="button" @click="closeSettings">关闭</button>
+        </header>
+
+        <div class="settings-body">
+          <label>
+            <span>后端 API Base</span>
+            <input type="text" v-model="config.backendBase" placeholder="http://localhost:8090/api/pdf" />
+          </label>
+
+          <div class="providers-header">
+            <h4>模型提供商</h4>
+            <button class="ghost" type="button" @click="openProviderDialog()">添加提供商</button>
+          </div>
+
+          <div v-for="provider in providerList" :key="provider.id" class="provider-card" :class="{ active: provider.id === activeProviderId }">
+            <div class="provider-card-head">
+              <div>
+                <h4>{{ provider.name }}</h4>
+                <p>{{ getProviderLabel(provider.type) }} · {{ provider.baseUrl || "未设置 Base URL" }}</p>
+              </div>
+              <div class="provider-card-actions">
+                <button class="ghost" type="button" @click="setActiveProvider(provider.id)">
+                  {{ provider.id === activeProviderId ? "当前提供商" : "设为当前" }}
+                </button>
+                <button class="ghost" type="button" @click="openProviderDialog(provider)">编辑</button>
+                <button class="ghost" type="button" @click="deleteProvider(provider.id)">删除</button>
+              </div>
+            </div>
+            <div class="provider-meta">
+              <span>API Key: {{ provider.apiKey ? maskKey(provider.apiKey) : "未设置" }}</span>
+              <span>当前模型: {{ activeModelMap[provider.id] || provider.models[0]?.id || "未选择" }}</span>
+            </div>
+            <div class="provider-tools">
+              <button class="ghost" type="button" @click="testProviderConnection(provider)">测试连接</button>
+              <button class="ghost" type="button" @click="fetchProviderModelList(provider)">获取模型列表</button>
+              <button class="ghost" type="button" @click="openModelDialog(provider.id)">添加模型</button>
+            </div>
+            <div class="model-list">
+              <div v-for="model in provider.models" :key="model.id" class="model-item">
+                <div>
+                  <strong>{{ model.name }}</strong>
+                  <span>{{ model.id }} · {{ getProviderLabel(model.apiType) }}</span>
+                </div>
+                <div class="model-actions">
+                  <button class="ghost" type="button" @click="setActiveModel(provider.id, model.id)">
+                    {{ activeModelMap[provider.id] === model.id ? "当前模型" : "设为当前" }}
+                  </button>
+                  <button class="ghost" type="button" @click="openModelDialog(provider.id, model)">编辑</button>
+                  <button class="ghost" type="button" @click="deleteModel(provider.id, model.id)">删除</button>
+                </div>
+              </div>
+              <p v-if="!provider.models.length" class="muted small">暂无模型</p>
+            </div>
+            <div v-if="fetchedModelsCache[provider.id]?.length" class="fetched-models">
+              <p>可用模型（点击加入）</p>
+              <div v-for="model in fetchedModelsCache[provider.id]" :key="model.id" class="fetched-model-item">
+                <span>{{ model.name }} · {{ model.id }}</span>
+                <button class="ghost" type="button" @click="importFetchedModel(provider.id, model)">加入</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-actions">
+          <button class="ghost" type="button" @click="handleTestConnection">测试当前提供商</button>
+          <button class="ghost" type="button" @click="handleFetchModels">获取模型列表</button>
+          <button class="ghost primary" type="button" @click="handleSaveSettings">保存设置</button>
+        </div>
+      </div>
+
+      <div class="dialog" v-if="providerDialogVisible">
+        <div class="dialog-panel">
+          <header>
+            <h4>{{ editingProviderId ? "编辑提供商" : "新增提供商" }}</h4>
+          </header>
+          <div class="dialog-body">
+            <label>
+              <span>名称</span>
+              <input type="text" v-model="providerForm.name" placeholder="例如：OpenAI 官方" />
+            </label>
+            <label>
+              <span>类型</span>
+              <select v-model="providerForm.type">
+                <option v-for="option in providerTypeOptions" :key="option.value" :value="option.value">
+                  {{ option.label }}
+                </option>
+              </select>
+            </label>
+            <label>
+              <span>API Base</span>
+              <input type="text" v-model="providerForm.baseUrl" placeholder="https://..." />
+            </label>
+            <label>
+              <span>API Key</span>
+              <input type="password" v-model="providerForm.apiKey" placeholder="sk-..." />
+            </label>
+          </div>
+          <div class="dialog-actions">
+            <button class="ghost" type="button" @click="providerDialogVisible = false">取消</button>
+            <button class="ghost primary" type="button" @click="saveProvider">保存</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="dialog" v-if="modelDialogVisible">
+        <div class="dialog-panel">
+          <header>
+            <h4>{{ editingModelId ? "编辑模型" : "新增模型" }}</h4>
+          </header>
+          <div class="dialog-body">
+            <label>
+              <span>模型名称</span>
+              <input type="text" v-model="modelForm.name" placeholder="例如：GPT-4o" />
+            </label>
+            <label>
+              <span>模型 ID</span>
+              <input type="text" v-model="modelForm.id" placeholder="gpt-4o-mini" />
+            </label>
+            <label>
+              <span>API 类型</span>
+              <select v-model="modelForm.apiType">
+                <option v-for="option in providerTypeOptions" :key="option.value" :value="option.value">
+                  {{ option.label }}
+                </option>
+              </select>
+            </label>
+          </div>
+          <div class="dialog-actions">
+            <button class="ghost" type="button" @click="modelDialogVisible = false">取消</button>
+            <button class="ghost primary" type="button" @click="saveModel">保存</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="toast.visible" class="toast" :class="`toast--${toast.type}`">
+      {{ toast.text }}
+    </div>
+  </div>
+</template>
